@@ -39,11 +39,25 @@
   "Returns t if 'text' starts with 'word'. NIL otherwise'"
   (string= word (subseq text 0 (min (length text) (length word)))))
 
+(defun merge-lines (lines)
+  (reduce (lambda (line1 line2)
+            (concatenate 'string line1 (string #\newline) line2))
+          lines))
+
+(defun format-time (&optional (time (get-universal-time)))
+  (multiple-value-bind (second minute hour date month year day daylight-p zone)
+      (decode-universal-time time)
+    (format nil "~A/~A/~A ~A:~A:~A" year month day hour minute second)))
+
 ;;; Perforce specific macros & functions
+
+(defvar *p4-log* (make-string-output-stream))
 
 (defmacro with-p4 ((stream command &optional (arguments "") &rest rest) &body body)
   `(with-pipe (,stream (format nil #+mac "/opt/local/bin/p4 ~A ~A" #-mac "p4 ~A ~A" ,command ,arguments) ,@rest)
-     ,@body))
+     (progn
+       (format *p4-log* "~A> ~A ~A~&" (format-time) ,command ,arguments)
+       ,@body)))
 
 (defun parse-info-line (line)
   "Parse info line produced by 'p4 info'"
@@ -61,6 +75,7 @@
                (string= (nth 5 words) "by"))
       (list (nth 1 words)          ; changelist
             (strcat (nth 3 words)  ; date
+                    "  "
                     (nth 4 words)) ; time
             (nth 6 words)          ; user@clientspec
             (nth 7 words)))))      ; *pending*
@@ -92,6 +107,7 @@
       (list (nth 1 words)              ; changelist
             (nth 3 words)              ; user@clientspec
             (strcat (nth 5 words)      ; date
+                    "  "
                     (nth 6 words)))))) ; time
 
 (defun parse-client-line (line)
@@ -143,7 +159,7 @@
             :text "Refresh"))
   (:default-initargs
    :visible-min-width 320
-   :visible-min-height 200))
+   :visible-min-height 100))
 
 (defmethod refresh-monitor ((monitor-interface monitor-interface))
   (with-slots (panel) monitor-interface
@@ -158,24 +174,52 @@
            (mp:make-timer 'capi:execute-with-interface-if-alive
                           monitor-interface 'refresh-monitor monitor-interface))
      1 5)))
-  
+
+(capi:define-interface log-interface ()
+  ()
+  (:panes
+   (log capi:collector-pane))
+  (:default-initargs
+   :visible-min-height 50
+   :visible-min-width 300))
+
+(defmethod initialize-instance :after ((log-interface log-interface) &rest rest)
+  (with-slots (log) log-interface
+    (setf *p4-log*
+          (capi:collector-pane-stream log))))
+
 (defun show-monitor ()
   (capi:display (make-instance 'monitor-interface)))
 
 ;;; 
 
 (capi:define-interface submitted-changelists-interface ()
-  ()
+  (changelist)
   (:panes
    (panel capi:multi-column-list-panel
-          :columns (column-titles "Changelist" "Date" "User" "Type" "Description"))
+          :columns (column-titles "Changelist" "Date" "User" "Type" "Description")
+          :callback-type '(:data :interface)
+          :selection-callback (lambda (data interface)
+                                (setf (slot-value interface 'changelist)
+                                      (first data))
+                                (refresh-details interface)))
+   (details capi:multi-line-text-input-pane
+            :text "blah")
    (refresh capi:push-button
             :callback-type :interface
             :callback 'refresh-submitted-changelists
             :text "Refresh"))
+  (:layouts
+   (layout1 capi:row-layout '(panel :divider details))
+   (layout2 capi:column-layout '(layout1 refresh)))
   (:default-initargs
    :visible-min-width 640
-   :visible-min-height 480))
+   :visible-min-height 280))
+
+(defmethod refresh-details ((submitted-changelists-interface submitted-changelists-interface))
+  (with-slots (details changelist) submitted-changelists-interface
+    (setf (capi:text-input-pane-text details)
+          (merge-lines (p4 "describe -s" changelist)))))
 
 (defmethod refresh-submitted-changelists ((submitted-changelists-interface submitted-changelists-interface))
   (with-slots (panel) submitted-changelists-interface
@@ -190,11 +234,24 @@
 
 ;;;
 
+(capi:define-interface changelist-describe-interface ()
+  ()
+  (:panes
+   (panel capi:multi-column-list-panel
+          :columns (column-titles "Changelist" "ClientSpec" "Date"))))
+   
+
+
+
 (capi:define-interface combined-test-interface ()
   ()
   (:panes
    (monitor monitor-interface)
-   (changes submitted-changelists-interface))
+   (changes submitted-changelists-interface)
+   (log log-interface))
+  (:layouts
+   (main capi:column-layout
+         '(monitor changes :divider log)))
   (:default-initargs
    :visible-min-width 1024
    :visible-min-height 768))
@@ -203,12 +260,6 @@
   (capi:display (make-instance 'combined-test-interface)))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-
-#+nil
-(capi:define-interface changelist-describe-interface ()
-  ()
-  (:panes
-   ()))
 
 (defun main ()
   (combined-test))
