@@ -49,6 +49,12 @@
       (decode-universal-time time)
     (format nil "~A ~A/~A/~A ~A:~A:~A" (elt sys::*week-days* day) year month date hour minute second)))
 
+(defun string-trim-nil (bag line)
+  (when line
+    (setf line (string-trim bag line))
+    (when (> (length line) 0)
+      line)))
+
 ;;; Perforce specific macros & functions
 
 (defvar *p4-log* (make-string-output-stream))
@@ -152,14 +158,15 @@
   (auto-refresh-timer)
   (:panes
    (panel capi:multi-column-list-panel
+          :title "Monitor"
           :columns (column-titles "ID" "A" "User" "Time" "Operation"))
    (refresh capi:push-button
             :callback-type :interface
             :callback 'refresh-monitor
             :text "Refresh"))
   (:default-initargs
-   :visible-min-width 320
-   :visible-min-height 100))
+   :visible-min-width 64
+   :visible-min-height 64))
 
 (defmethod refresh-monitor ((monitor-interface monitor-interface))
   (with-slots (panel) monitor-interface
@@ -175,13 +182,29 @@
                           monitor-interface 'refresh-monitor monitor-interface))
      1 5)))
 
+(capi:define-interface clientspec-interface ()
+  ()
+  (:panes
+   (panel capi:multi-column-list-panel
+          :title "Clientspec"
+          :columns (column-titles "Key" "Value")))
+  (:default-initargs
+   :visible-min-width 64
+   :visible-min-height 64))
+
+(defmethod initialize-instance :after ((clientspec-interface clientspec-interface) &rest rest)
+  (with-slots (panel) clientspec-interface
+    (setf (capi:collection-items panel)
+          (parse-clientspec (p4 "client -o")))))
+
 (capi:define-interface log-interface ()
   ()
   (:panes
-   (log capi:collector-pane))
+   (log capi:collector-pane
+        :title "Log"))
   (:default-initargs
-   :visible-min-height 50
-   :visible-min-width 300))
+   :visible-min-height 64
+   :visible-min-width 64))
 
 (defmethod initialize-instance :after ((log-interface log-interface) &rest rest)
   (with-slots (log) log-interface
@@ -197,6 +220,7 @@
   (changelist)
   (:panes
    (panel capi:multi-column-list-panel
+          :title "Changelists"
           :columns (column-titles "Changelist" "Date" "User" "Type" "Description")
           :callback-type '(:data :interface)
           :selection-callback (lambda (data interface)
@@ -204,6 +228,7 @@
                                       (first data))
                                 (refresh-details interface)))
    (details capi:multi-line-text-input-pane
+            ;;:title "Description"
             :text "blah")
    (refresh capi:push-button
             :callback-type :interface
@@ -247,14 +272,18 @@
   ()
   (:panes
    (monitor monitor-interface)
+   (clientspec clientspec-interface)
    (changes submitted-changelists-interface)
    (log log-interface))
   (:layouts
    (main capi:column-layout
-         '(monitor changes :divider log)))
+         '(changes :divider lay1))
+   (lay1 capi:row-layout
+         '(log :divider monitor :divider clientspec)))
   (:default-initargs
-   :visible-min-width 1024
-   :visible-min-height 768))
+   :title "p4bee"
+   :visible-min-width 1920
+   :visible-min-height 1100))
 
 (defun combined-test ()
   (capi:display (make-instance 'combined-test-interface)))
@@ -263,3 +292,28 @@
 
 (defun main ()
   (combined-test))
+
+(defvar *clientspec* (p4 "client -o"))
+
+(defun parse-clientspec (&optional (lines *clientspec*))
+  (loop with bag = nil
+        with filter = '(#\Space #\Tab)
+        with key = nil
+        with values = nil
+        for line1 in lines
+        for comment = (position #\# line1)
+        for line = (if comment (subseq line1 0 comment) line1)
+        for colon = (position #\: line)
+        for line-key = (string-trim-nil filter (when colon (subseq line 0 colon)))
+        for line-val = (string-trim-nil filter (if colon (subseq line (1+ colon)) line))
+        when line-key do (progn (when key
+                                  (pushnew (cons key values) bag))
+                           (setf key (intern (string-upcase line-key) "KEYWORD")
+                                 values nil))
+        do (when line-val
+             (setf line-val (case key
+                              ((:VIEW :OPTIONS) (split line-val))
+                              (otherwise line-val)))
+             (pushnew line-val values))
+        finally (when key (pushnew (cons key values) bag))
+        finally return bag))
