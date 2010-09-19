@@ -47,7 +47,7 @@
 (defun format-time (&optional (time (get-universal-time)))
   (multiple-value-bind (second minute hour date month year day daylight-p zone)
       (decode-universal-time time)
-    (format nil "~A/~A/~A ~A:~A:~A" year month day hour minute second)))
+    (format nil "~A ~A/~A/~A ~A:~A:~A" (elt sys::*week-days* day) year month date hour minute second)))
 
 ;;; Perforce specific macros & functions
 
