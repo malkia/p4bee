@@ -1,0 +1,3 @@
+P4BEE
+
+load p4bee.lisp, compile it, and type (p4bee::main)
