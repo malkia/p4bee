@@ -352,7 +352,7 @@
     :children-function     'depot-children-function
     :leaf-node-p-function  'depot-leaf-node-p-function
     :expandp-function      'depot-expandp-function
-    :checkbox-status       t))
+    :checkbox-status       nil))
   (:default-initargs
    :visible-min-width 128
    :visible-min-height 64))

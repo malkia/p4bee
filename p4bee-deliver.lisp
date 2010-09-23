@@ -11,5 +11,5 @@
   (deliver (find-symbol (string-upcase main) (string-upcase application))
            #+win32 (current-pathname (merge-pathnames application ".exe"))
            #+cocoa (write-macos-application-bundle
-                    (current-pathname (merge-pathnames application ".app") :document-types nil))
+                    (current-pathname (merge-pathnames application ".app")) :document-types nil)
            5 :interface :capi))
