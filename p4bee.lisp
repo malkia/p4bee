@@ -5,6 +5,8 @@
 (setf (lw:environment-variable "P4USER") "malkia")
 (setf (lw:environment-variable "P4CLIENT") "malkia")
 
+(defvar *product-registry-path* (sys:product-registry-path :p4bee))
+
 (defmacro with-pipe ((stream command &rest rest) &body body)
   "Opens a pipe, by executing the 'command'. Captures the output in 'stream'. Expands the 'body'. At the end closes the pipe."
   `(let ((,stream (sys:open-pipe ,command ,@rest)))
@@ -389,3 +391,32 @@
   (with-slots (panel) depot-interface
     (setf (capi:tree-view-roots panel)
           (mapcar (lambda (x) (remove-end x "/...")) (mapcar 'first (rest (assoc :VIEW (parse-clientspec (p4 "client -o")))))))))
+
+(capi:define-interface configuration-interface ()
+  ()
+  (:panes
+   (port capi:text-input-pane :title "Port")
+   (host capi:text-input-pane :title "Host")
+   (client capi:text-input-pane :title "Client")
+   (okay capi:push-button :text "OK")
+   (cancel capi:push-button :text "Cancel"))
+  (:layouts
+   (main capi:column-layout '(lay1 lay2))
+   (lay1 capi:column-layout '(port host client))
+   (lay2 capi:row-layout '(okay cancel)))
+  (:default-initargs
+   :title "Perforce Configuration"
+   :visible-min-width 256
+;;   :visible-min-height 128
+))
+
+(defmethod initialize-instance :after ((configuration-interface configuration-interface))
+  (mapcar (lambda (name)
+            (setf (slot-value configuration-interface key)
+                  (lw:user-preference "config" (format nil "~A" key) :product :p4bee)))
+          '(port host client)))
+          
+(defun config ()
+  (capi:contain 'configuration-interface))
+
+
