@@ -1,9 +1,9 @@
 (defpackage "P4BEE" (:use "CL"))
 (in-package "P4BEE")
 
-(setf (lw:environment-variable "P4PORT") #+nil "bundy:1666" #-nil "public.perforce.com:1666")
-
-;;; sys:open-pipe is Lispworks specific
+(setf (lw:environment-variable "P4PORT")
+      #-nil "bundy:1666"
+      #+nil "public.perforce.com:1666")
 
 (defmacro with-pipe ((stream command &rest rest) &body body)
   "Opens a pipe, by executing the 'command'. Captures the output in 'stream'. Expands the 'body'. At the end closes the pipe."
@@ -11,21 +11,23 @@
      (prog1 ,@body
        (close ,stream))))
 
-;; Questionable macro
-(defmacro for-each-line ((stream line) what &body body)
-  "Wrapper around 'for'. Iterates through each line while there is line and does 'what' to the 'body'"
-  `(loop for ,line = (read-line ,stream nil nil)
-         while ,line
-         ,what ,@body))
-
 (defun slurp (stream)
-  "Reads the whole stream, and returns a list of lines"
+  "Reads the stream line by line, and returns it as a list of lines"
   (loop for line = (read-line stream nil nil)
         while line
         collect line))
 
 (defun strcat (&rest strings)
+  "Concatenates all of the strings into one, and returns it"
   (apply 'concatenate 'string strings))
+
+(defun starts-with-p (text word)
+  "Returns t if 'text' starts with 'word'. NIL otherwise"
+  (string= word (subseq text 0 (min (length text) (length word)))))
+
+(defun ends-with-p (text word)
+  "Returns t if 'text' starts with 'word'. NIL otherwise"
+  (string= word (subseq text (- (length text) (min (length text) (length word))))))
 
 (defun split (string)
   "Splits a line delimited by space into list of tokens"
@@ -34,10 +36,6 @@
 (defun split-lines (lines)
   "Splits lines, where each is delimited by space into list of list of tokens"
   (mapcar 'split lines))
-
-(defun starts-with-p (text word)
-  "Returns t if 'text' starts with 'word'. NIL otherwise'"
-  (string= word (subseq text 0 (min (length text) (length word)))))
 
 (defun merge-lines (lines)
   (reduce (lambda (line1 line2)
@@ -70,7 +68,7 @@
   (let ((p (position #\: line)))
     (if (null p)
         (format t "line=~A" line)
-      (cons (intern (string-upcase (substitute #\- #\Space (subseq line 0 p))) "KEYWORD")
+      (list (intern (string-upcase (substitute #\- #\Space (subseq line 0 p))) "KEYWORD")
             (string-trim " " (subseq line (1+ p)))))))
 
 (defun parse-changelist-line (line)
@@ -133,8 +131,7 @@
 
 (defun p4 (command &optional (arguments ""))
   (with-p4 (s command arguments)
-    (for-each-line (s line)
-        collect line)))
+    (slurp s)))
 
 ;;; Some default information
 
@@ -196,6 +193,21 @@
   (with-slots (panel) clientspec-interface
     (setf (capi:collection-items panel)
           (parse-clientspec (p4 "client -o")))))
+
+(capi:define-interface info-interface ()
+  ()
+  (:panes
+   (panel capi:multi-column-list-panel
+          :title "Info"
+          :columns (column-titles "Key" "Value")))
+  (:default-initargs
+   :visible-min-width 64
+   :visible-min-height 64))
+
+(defmethod initialize-instance :after ((info-interface info-interface) &rest rest)
+  (with-slots (panel) info-interface
+    (setf (capi:collection-items panel)
+          (p4-info))))
 
 (capi:define-interface log-interface ()
   ()
@@ -264,22 +276,23 @@
   (:panes
    (panel capi:multi-column-list-panel
           :columns (column-titles "Changelist" "ClientSpec" "Date"))))
-   
-
-
 
 (capi:define-interface combined-test-interface ()
   ()
   (:panes
    (monitor monitor-interface)
+   (depot depot-interface)
    (clientspec clientspec-interface)
+   (info info-interface)
    (changes submitted-changelists-interface)
    (log log-interface))
   (:layouts
    (main capi:column-layout
-         '(changes :divider lay1))
+         '(depot :divider changes :divider lay1))
+   (lay2 capi:column-layout
+         '(clientspec :divider info))
    (lay1 capi:row-layout
-         '(log :divider monitor :divider clientspec)))
+         '(log :divider monitor :divider lay2)))
   (:default-initargs
    :title "p4bee"
    :visible-min-width 1920
@@ -317,3 +330,36 @@
              (pushnew line-val values))
         finally (when key (pushnew (cons key values) bag))
         finally return bag))
+
+(capi:define-interface depot-interface ()
+  ()
+  (:panes
+   (panel capi:extended-selection-tree-view
+    :children-function     'depot-children-function
+    ;;:leaf-node-p-function  'depot-leaf-node-p-function
+    :expandp-function      'depot-expandp-function
+    :has-root-line         t
+    :checkbox-status       t
+    :roots '("//depot")))
+  (:default-initargs
+   :visible-min-width 128
+   :visible-min-height 64))
+
+(defun depot-leaf-node-p-function (duh)
+  t)
+
+(defun remove-ellipsis (string)
+  (when (ends-with-p string "...")
+    (subseq string 0 (- (length string) 3))))
+
+(defun depot-children-function (duh)
+  (p4 (format nil "dirs ~A/*" duh)))
+
+(defun depot-expandp-function (duh)
+  nil)
+  
+(defmethod initialize-instance :after ((depot-interface depot-interface) &rest rest)
+  #+nil
+  (with-slots (panel) depot-interface
+    (setf (capi:tree-view-roots panel)
+          (rest (assoc :VIEW (parse-clientspec (p4 "client -o")))))))
