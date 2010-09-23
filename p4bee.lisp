@@ -1,9 +1,9 @@
 (defpackage "P4BEE" (:use "CL"))
 (in-package "P4BEE")
 
-(setf (lw:environment-variable "P4PORT")
-      #-nil "bundy:1666"
-      #+nil "public.perforce.com:1666")
+(setf (lw:environment-variable "P4PORT") "public.perforce.com:1666")
+(setf (lw:environment-variable "P4USER") "malkia")
+(setf (lw:environment-variable "P4CLIENT") "malkia")
 
 (defmacro with-pipe ((stream command &rest rest) &body body)
   "Opens a pipe, by executing the 'command'. Captures the output in 'stream'. Expands the 'body'. At the end closes the pipe."
@@ -26,7 +26,7 @@
   (string= word (subseq text 0 (min (length text) (length word)))))
 
 (defun ends-with-p (text word)
-  "Returns t if 'text' starts with 'word'. NIL otherwise"
+  "Returns t if 'text' ends with 'word'. NIL otherwise"
   (string= word (subseq text (- (length text) (min (length text) (length word))))))
 
 (defun split (string)
@@ -45,7 +45,7 @@
 (defun format-time (&optional (time (get-universal-time)))
   (multiple-value-bind (second minute hour date month year day daylight-p zone)
       (decode-universal-time time)
-    (format nil "~A ~A/~A/~A ~A:~A:~A" (elt sys::*week-days* day) year month date hour minute second)))
+    (format nil "~A ~D/~2,'0D/~2,'0D ~2,'0D:~2,'0D:~2,'0D" (elt sys::*week-days* day) year month date hour minute second)))
 
 (defun string-trim-nil (bag line)
   (when line
@@ -58,11 +58,18 @@
 (defvar *p4-log* (make-string-output-stream))
 
 (defmacro with-p4 ((stream command &optional (arguments "") &rest rest) &body body)
-  `(with-pipe (,stream (format nil #+mac "/opt/local/bin/p4 ~A ~A" #-mac "p4 ~A ~A" ,command ,arguments) ,@rest)
-     (progn
-       (format *p4-log* "~A> ~A ~A~&" (format-time) ,command ,arguments)
-       ,@body)))
-
+  `(let ((utime (get-universal-time))
+         (rtime (get-internal-real-time)))
+     (prog2 
+         (format *p4-log* "~A> ~A ~A" (format-time utime) ,command ,arguments)
+         (with-pipe (,stream (format nil #+mac "/opt/local/bin/p4 ~A ~A" #-mac "p4 ~A ~A" ,command ,arguments) ,@rest)
+           (progn
+             ,@body))
+       (format *p4-log* "  [~,2Fs]~&"
+               (coerce (/ (- (get-internal-real-time) rtime)
+                          internal-time-units-per-second)
+                       'double-float)))))
+         
 (defun parse-info-line (line)
   "Parse info line produced by 'p4 info'"
   (let ((p (position #\: line)))
@@ -213,7 +220,8 @@
   ()
   (:panes
    (log capi:collector-pane
-        :title "Log"))
+        :enabled :read-only
+        :title "log"))
   (:default-initargs
    :visible-min-height 64
    :visible-min-width 64))
@@ -247,7 +255,7 @@
             :callback 'refresh-submitted-changelists
             :text "Refresh"))
   (:layouts
-   (layout1 capi:row-layout '(panel :divider details))
+   (layout1 capi:column-layout '(panel :divider details))
    (layout2 capi:column-layout '(layout1 refresh)))
   (:default-initargs
    :visible-min-width 640
@@ -288,13 +296,19 @@
    (log log-interface))
   (:layouts
    (main capi:column-layout
-         '(depot :divider changes :divider lay1))
+         '(lay3 :divider lay1))
+   (lay3 capi:row-layout
+         '(depot :divider changes))
    (lay2 capi:column-layout
          '(clientspec :divider info))
    (lay1 capi:row-layout
          '(log :divider monitor :divider lay2)))
   (:default-initargs
    :title "p4bee"
+   :message-area t
+   :auto-menus t
+   :menu-bar-items (list (make-instance 'capi:menu :title "Menu" :items '(1 2 3)))
+   :display-state :maximized
    :visible-min-width 1920
    :visible-min-height 1100))
 
@@ -336,30 +350,42 @@
   (:panes
    (panel capi:extended-selection-tree-view
     :children-function     'depot-children-function
-    ;;:leaf-node-p-function  'depot-leaf-node-p-function
+    :leaf-node-p-function  'depot-leaf-node-p-function
     :expandp-function      'depot-expandp-function
-    :has-root-line         t
-    :checkbox-status       t
-    :roots '("//depot")))
+    :checkbox-status       t))
   (:default-initargs
    :visible-min-width 128
    :visible-min-height 64))
 
 (defun depot-leaf-node-p-function (duh)
-  t)
+  (search " - " duh))
 
 (defun remove-ellipsis (string)
   (when (ends-with-p string "...")
     (subseq string 0 (- (length string) 3))))
 
+(defun remove-end (string what-end)
+  (if (ends-with-p string what-end)
+      (subseq string 0 (- (length string) (length what-end)))
+    string))
+
+(defun filter-no-such-files (list)
+  (dolist (item list)
+    (when (ends-with-p item " - no such file(s).")
+      (return-from filter-no-such-files)))
+  list)
+
 (defun depot-children-function (duh)
-  (p4 (format nil "dirs ~A/*" duh)))
+  (let ((dirs (filter-no-such-files (p4 (format nil "dirs -C ~A/*" duh)))))
+    (when dirs
+      (let ((files (filter-no-such-files (p4 (format nil "files ~A/*" duh)))))
+        (when files
+          (append dirs files))))))
 
 (defun depot-expandp-function (duh)
   nil)
   
 (defmethod initialize-instance :after ((depot-interface depot-interface) &rest rest)
-  #+nil
   (with-slots (panel) depot-interface
     (setf (capi:tree-view-roots panel)
-          (rest (assoc :VIEW (parse-clientspec (p4 "client -o")))))))
+          (mapcar (lambda (x) (remove-end x "/...")) (mapcar 'first (rest (assoc :VIEW (parse-clientspec (p4 "client -o")))))))))
