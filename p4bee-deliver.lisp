@@ -12,4 +12,16 @@
            #+win32 (current-pathname (merge-pathnames application ".exe"))
            #+cocoa (write-macos-application-bundle
                     (current-pathname (merge-pathnames application ".app")) :document-types nil)
-           5 :interface :capi))
+           5
+           :interface :capi
+           :keep-conditions :none
+           :delete-packages '("HQN-WEB")
+ ;          :call-count t
+;           :clos-info :classes-and-methods
+;           :interrogate-symbols t
+           :numeric nil
+           :keep-trans-numbers t
+           :smash-packages (list "HQN-WEB" "SQL" "SQL-COMMON")
+;           :manifest-file :no-common-controls-6
+           :diagnostics-file (current-pathname (merge-pathnames application ".deliv"))
+))

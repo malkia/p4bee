@@ -1,15 +1,27 @@
 (defpackage "P4BEE" (:use "CL"))
 (in-package "P4BEE")
 
-(setf (lw:environment-variable "P4PORT") "public.perforce.com:1666")
-(setf (lw:environment-variable "P4USER") "malkia")
-(setf (lw:environment-variable "P4CLIENT") "malkia")
+(defvar *default-environment-variables*
+  '(("P4PORT" "public.perforce.com:1666")
+    ("P4USER" "malkia")
+    ("P4CLIENT" "malkia"))
+  "Default builtin variables to ease the development. Normally we should store this in registry/configuration file and use them from there")
+
+(defun set-environment-variables (&optional (environment-variables *default-environment-variables*))
+  "Sets environment variables in the currently running process"
+  (mapcar (lambda (item)
+            (setf (lw:environment-variable (first item))
+                  (second item)))
+          environment-variables))
+
+(set-environment-variables)
 
 (defvar *product-registry-path* (sys:product-registry-path :p4bee))
+(defvar *p4* #+mac "/opt/local/bin/p4" #-mac "p4")
 
-(defmacro with-pipe ((stream command &rest rest) &body body)
+(defmacro with-pipe ((stream &rest cmdline) &body body)
   "Opens a pipe, by executing the 'command'. Captures the output in 'stream'. Expands the 'body'. At the end closes the pipe."
-  `(let ((,stream (sys:open-pipe ,command ,@rest)))
+  `(let ((,stream (sys:open-pipe (list ,@cmdline))))
      (prog1 ,@body
        (close ,stream))))
 
@@ -40,9 +52,10 @@
   (mapcar 'split lines))
 
 (defun merge-lines (lines)
-  (reduce (lambda (line1 line2)
-            (concatenate 'string line1 (string #\newline) line2))
-          lines))
+  (when lines
+    (reduce (lambda (line1 line2)
+              (concatenate 'string line1 (string #\newline) line2))
+            lines)))
 
 (defun format-time (&optional (time (get-universal-time)))
   (multiple-value-bind (second minute hour date month year day daylight-p zone)
@@ -59,18 +72,41 @@
 
 (defvar *p4-log* (make-string-output-stream))
 
-(defmacro with-p4 ((stream command &optional (arguments "") &rest rest) &body body)
+(defmacro with-p4 ((stream &rest cmdline) &body body)
   `(let ((utime (get-universal-time))
          (rtime (get-internal-real-time)))
-     (prog2 
-         (format *p4-log* "~A> ~A ~A" (format-time utime) ,command ,arguments)
-         (with-pipe (,stream (format nil #+mac "/opt/local/bin/p4 ~A ~A" #-mac "p4 ~A ~A" ,command ,arguments) ,@rest)
-           (progn
-             ,@body))
-       (format *p4-log* "  [~,2Fs]~&"
-               (coerce (/ (- (get-internal-real-time) rtime)
-                          internal-time-units-per-second)
-                       'double-float)))))
+     (progn 
+         (format *p4-log* "~A> ~A" (format-time utime) (list ,@cmdline))
+         (finish-output *p4-log*)
+         (prog1 (with-pipe (,stream *p4* ,@cmdline)
+                  ,@body)
+           (format *p4-log* "  [~,2Fs]~&"
+                   (coerce (/ (- (get-internal-real-time) rtime)
+                              internal-time-units-per-second)
+                           'double-float))))))
+
+(defmacro run-p4 (&rest cmdline)
+  `(let ((utime (get-universal-time))
+         (rtime (get-internal-real-time))
+         (output))
+     (format *p4-log* "~A> ~A" (format-time utime) ,@cmdline)
+     (finish-output *p4-log*)
+     (with-pipe (stream *p4* "-s" ,@cmdline)
+       (setf output
+             (loop for line = (read-line stream nil nil)
+                   while line
+                   do (format t ".")
+                   do (finish-output *standard-output*)
+                   collect (let* ((space (position #\Space line))
+                                  (tag (subseq line 0 (1- space)))
+                                  (rest (subseq line (1+ space))))
+                             (list tag rest)))))
+     (format *p4-log* " [~,2Fs]~&"
+             (coerce (/ (- (get-internal-real-time) rtime)
+                        internal-time-units-per-second)
+                     'double-float))
+     output))
+
          
 (defun parse-info-line (line)
   "Parse info line produced by 'p4 info'"
@@ -138,9 +174,10 @@
   (with-p4 (s "info")
     (mapcar 'parse-info-line (slurp s))))
 
-(defun p4 (command &optional (arguments ""))
-  (with-p4 (s command arguments)
-    (slurp s)))
+(defmacro p4 (&rest cmdline)
+  (let ((s (gensym)))
+    `(with-p4 (s ,@cmdline)
+       (slurp s))))
 
 ;;; Some default information
 
@@ -177,7 +214,7 @@
 (defmethod refresh-monitor ((monitor-interface monitor-interface))
   (with-slots (panel) monitor-interface
     (setf (capi:collection-items panel)
-          (split-lines (p4 "monitor show")))))  
+          (split-lines (p4 "monitor" "show")))))  
 
 (defmethod initialize-instance :after ((monitor-interface monitor-interface) &rest rest)
   (refresh-monitor monitor-interface)
@@ -201,7 +238,7 @@
 (defmethod initialize-instance :after ((clientspec-interface clientspec-interface) &rest rest)
   (with-slots (panel) clientspec-interface
     (setf (capi:collection-items panel)
-          (parse-clientspec (p4 "client -o")))))
+          (parse-clientspec (p4 "client" "-o")))))
 
 (capi:define-interface info-interface ()
   ()
@@ -266,12 +303,12 @@
 (defmethod refresh-details ((submitted-changelists-interface submitted-changelists-interface))
   (with-slots (details changelist) submitted-changelists-interface
     (setf (capi:text-input-pane-text details)
-          (merge-lines (p4 "describe -s" changelist)))))
+          (merge-lines (p4 "describe" "-s" changelist)))))
 
 (defmethod refresh-submitted-changelists ((submitted-changelists-interface submitted-changelists-interface))
   (with-slots (panel) submitted-changelists-interface
     (setf (capi:collection-items panel)
-          (merge-changelist-lines-with-descriptions (p4 "changes -m 100 -t -l")))))
+          (merge-changelist-lines-with-descriptions (p4 "changes" "-m 100" "-t" "-l")))))
                     
 (defmethod initialize-instance :after ((submitted-changelists-interface submitted-changelists-interface) &rest rest)
   (refresh-submitted-changelists submitted-changelists-interface))
@@ -322,7 +359,7 @@
 (defun main ()
   (combined-test))
 
-(defvar *clientspec* (p4 "client -o"))
+(defvar *clientspec* (p4 "client" "-o"))
 
 (defun parse-clientspec (&optional (lines *clientspec*))
   (loop with bag = nil
@@ -351,13 +388,43 @@
   ()
   (:panes
    (panel capi:extended-selection-tree-view
-    :children-function     'depot-children-function
-    :leaf-node-p-function  'depot-leaf-node-p-function
-    :expandp-function      'depot-expandp-function
-    :checkbox-status       nil))
+          :title "Depot View"
+          :children-function    'depot-children-function
+          :leaf-node-p-function 'depot-leaf-node-p-function
+          :expandp-function     'depot-expandp-function
+          :print-function       'depot-print-function
+          :selection-callback   'depot-action-callback
+          :checkbox-status       nil)
+   (preview capi:multi-line-text-input-pane
+            :horizontal-scroll t
+            :vertical-scroll t))
+  (:layouts
+   (main capi:row-layout '(panel :divider preview)))
   (:default-initargs
    :visible-min-width 128
    :visible-min-height 64))
+
+;; I need to encode in the actual item the data, 
+;; :roots would need to be initialized with it
+;; and depot-print-function would strip these out and return normal printout
+;;
+;; (list depot-interface item status text)
+;;
+;; So when we do depot-children-function
+;; It would automatically return (list depot-interface item :WORKING "Retrieveing: Blah Blah")
+;; Once this operation is finished (it's done in parallel), it would update the item
+
+(defun depot-action-callback (item interface)
+  (let ((position (search " - " item)))
+  (setf (capi:text-input-pane-text (slot-value interface 'preview))
+        (merge-lines (p4 "print" "-q" (subseq item 0 position))))))
+
+(defun depot-print-function (duh)
+  (when (listp duh)
+      (setf duh (first duh)))
+  (let ((slash (position #\/ duh :from-end t))
+        (sharp (position #\# duh :from-end t)))
+    (subseq duh (if slash (1+ slash) 0) sharp)))
 
 (defun depot-leaf-node-p-function (duh)
   (search " - " duh))
@@ -378,19 +445,49 @@
   list)
 
 (defun depot-children-function (duh)
-  (let ((dirs (filter-no-such-files (p4 (format nil "dirs -C ~A/*" duh)))))
-    (when dirs
-      (let ((files (filter-no-such-files (p4 (format nil "files ~A/*" duh)))))
-        (when files
+  (format t "~A~&" duh)
+  (prog1
+    (list (format nil "~A" duh))
+    (let ((dirs (filter-no-such-files (p4 "dirs" "-C" duh "/*"))))
+      (when dirs
+        (let ((files (filter-no-such-files (p4 "files" duh "/*"))))
           (append dirs files))))))
-
+          
 (defun depot-expandp-function (duh)
   nil)
-  
+
+(defmacro mp-run (&body body)
+  `(mp:process-run-function
+    "mp-run" nil
+    (lambda ()
+      ,@body)))
+
+;; The async update pattern 
+;; 
+;; mp:run-process
+;;  (lambda () (let (results (calculate-data-which-takes-time)))
+;;    (when-results-are-collected - 
+;;         execute-with-interface -> set the data)
+;; But also we have to keep storing the depot/interface in there
+
 (defmethod initialize-instance :after ((depot-interface depot-interface) &rest rest)
   (with-slots (panel) depot-interface
-    (setf (capi:tree-view-roots panel)
-          (mapcar (lambda (x) (remove-end x "/...")) (mapcar 'first (rest (assoc :VIEW (parse-clientspec (p4 "client -o")))))))))
+    (mp-run
+      ;; The job needs to be done between mp-run AND capi:execute-with-interface
+      (let ((results (mapcar (lambda (x) (list (remove-end x "/...") "Blah"))
+                             (mapcar 'first (rest (assoc :VIEW (parse-clientspec (p4 "client" "-o"))))))))
+        ;; The job is finished. Now we can fetch the results back to the pane.
+        (capi:execute-with-interface
+         depot-interface
+         (lambda () (setf (capi:tree-view-roots panel) results)))))))
+#|
+                                               
+                (lambda (x)
+                  (capi:apply-in-pane-process
+
+          (mapcar (lambda (x) (list (remove-end x "/...") "Blah"))
+                  (mapcar 'first (rest (assoc :VIEW (parse-clientspec (p4 "client" "-o")))))))))
+|#
 
 (capi:define-interface configuration-interface ()
   ()
@@ -410,6 +507,7 @@
 ;;   :visible-min-height 128
 ))
 
+#+nil
 (defmethod initialize-instance :after ((configuration-interface configuration-interface))
   (mapcar (lambda (name)
             (setf (slot-value configuration-interface key)
@@ -419,4 +517,5 @@
 (defun config ()
   (capi:contain 'configuration-interface))
 
-
+;; (list "Working" (lambda () (worker)))
+;;
